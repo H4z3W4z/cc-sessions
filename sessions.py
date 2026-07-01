@@ -46,6 +46,8 @@ def parse_session(path: Path) -> dict:
     cwd = None
     session_id = path.stem
     summary = None  # first real user message, used when there's no custom name
+    first_full = None  # full first user message, for the TUI preview panel
+    msgs = 0  # count of user + assistant turns
 
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
@@ -64,10 +66,14 @@ def parse_session(path: Path) -> dict:
                     cwd = d["cwd"]
                 if d.get("sessionId"):
                     session_id = d["sessionId"]
+                if d.get("type") in ("user", "assistant"):
+                    msgs += 1
                 if summary is None and d.get("type") == "user":
                     text = first_user_text(d.get("message", {}))
                     if text and not is_noise(text):
-                        summary = " ".join(text.split())[:60]
+                        flat = " ".join(text.split())
+                        summary = flat[:60]
+                        first_full = flat[:2000]
     except OSError:
         pass
 
@@ -79,6 +85,8 @@ def parse_session(path: Path) -> dict:
         "id": session_id,
         "name": title or "",
         "summary": summary or "",
+        "first": first_full or "",
+        "msgs": msgs,
         "cwd": cwd,
         "mtime": path.stat().st_mtime,
         "size": path.stat().st_size,
@@ -95,11 +103,14 @@ def collect() -> list[dict]:
 
 
 def human_size(n: int) -> str:
-    for unit in ("B", "K", "M", "G"):
-        if n < 1024:
-            return f"{n:.0f}{unit}"
-        n /= 1024
-    return f"{n:.0f}T"
+    size = float(n)
+    for unit in ("B", "K", "M", "G", "T"):
+        if size < 1024 or unit == "T":
+            # bytes/KiB read cleaner as integers; MiB+ get one decimal (2.1M)
+            if unit in ("B", "K"):
+                return f"{size:.0f}{unit}"
+            return f"{size:.1f}{unit}"
+        size /= 1024
 
 
 def main() -> None:
