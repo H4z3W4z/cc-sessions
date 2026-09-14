@@ -14,11 +14,13 @@ Keys:
     Right / Left     open / close the preview for the selected row
     Tab              cycle sort: recent <-> directory
     Ctrl+X           toggle --dangerously-skip-permissions
+    Ctrl+N           launch a NEW session (filter-path / selected dir / cwd)
     Ctrl+D           delete the selected session (confirm y/N)
     Enter            resume the selected session
     Esc              clear filter / close preview; again to quit
     mouse            click a row to select, click again (or the caret) to expand;
-                     click the sort tabs, skip-perms chip, or preview buttons
+                     click the sort tabs, skip-perms chip, the ＋new chip, or
+                     preview buttons
 
 Usage:
     python3 sessions_tui.py
@@ -259,6 +261,21 @@ class View:
     def n_dirs(self):
         return len({s["cwd"] for s in self.all})
 
+    def new_session_dir(self) -> str:
+        """Directory a new session would launch in.
+
+        Preference order: an existing directory typed into the filter, then the
+        selected row's directory, then the process cwd. Pure logic (no curses),
+        so it is unit-testable.
+        """
+        q = os.path.expanduser(self.query.strip())
+        if q and os.path.isdir(q):
+            return os.path.abspath(q)
+        rows = self.filtered()
+        if rows and 0 <= self.sel < len(rows):
+            return rows[self.sel]["cwd"]
+        return os.getcwd()
+
     def set_toast(self, text):
         self.toast = (text, time.time() + 3.2)
 
@@ -293,10 +310,12 @@ class View:
         count = f"  {total} sessions across {self.n_dirs()} directories"
         put(s, 0, x, count, th.dim, width)
 
-        # right cluster: sort tabs + skip chip
+        # right cluster: sort tabs + skip chip + new-session chip
         skip_label = f"⌃X skip-perms {'ON' if self.skip else 'off'}"
+        new_label = "⌃N ＋new"
         recent_txt, dir_txt = "recent", "directory"
-        cluster = 5 + len(recent_txt) + 2 + len(dir_txt) + 3 + len(skip_label) + 2
+        cluster = (5 + len(recent_txt) + 2 + len(dir_txt) + 3
+                   + len(skip_label) + 3 + len(new_label) + 2)
         cx = max(x + 1, width - cluster - 1)
         cx = put(s, 0, cx, "sort ", th.dim, width)
         r_attr = (th.bright | curses.A_BOLD) if self.sort == "recent" else th.dim
@@ -313,6 +332,10 @@ class View:
         sx0 = cx
         cx = put(s, 0, cx, skip_label, chip_attr, width)
         self.click_regions.append((0, sx0, cx, "skip", None))
+        cx = put(s, 0, cx, "   ", th.dim, width)
+        nx0 = cx
+        cx = put(s, 0, cx, new_label, th.green | curses.A_BOLD, width)
+        self.click_regions.append((0, nx0, cx, "new", None))
 
     def _filter(self, width, th, rows, total, t):
         s = self.stdscr
@@ -521,7 +544,10 @@ class View:
         if list_h < 1:
             return
         if not rows:
-            msg = f"no sessions match “{self.query}” — esc to clear" if self.query else "no sessions found"
+            if self.query:
+                msg = f"no sessions match “{self.query}” — esc to clear · ⌃N new session"
+            else:
+                msg = "no sessions found — ⌃N to start a new one"
             put(self.stdscr, list_top + list_h // 2, max(1, (width - len(msg)) // 2), msg, th.dim, width)
             return
 
@@ -557,8 +583,8 @@ class View:
             put(s, y, 1, ellipsize(self.toast[0], width - 2), th.accent, width)
             return
         hints = [("↑↓", "navigate"), ("→", "preview"), ("↵", "resume"),
-                 ("⇥", "sort"), ("⌃X", "skip-perms"), ("⌃D", "delete"),
-                 ("esc", "quit")]
+                 ("⌃N", "new"), ("⇥", "sort"), ("⌃X", "skip-perms"),
+                 ("⌃D", "delete"), ("esc", "quit")]
         x = 1
         for key, desc in hints:
             x = put(s, y, x, key, th.sec | curses.A_REVERSE, width)
@@ -577,6 +603,8 @@ class View:
                         self.top = 0
                 elif kind == "skip":
                     self.skip = not self.skip
+                elif kind == "new":
+                    return ("new", self.new_session_dir())
                 elif kind == "row":
                     i, s = payload
                     if i == self.sel:
@@ -659,12 +687,14 @@ class View:
                 self.top = 0
             elif ch == "\x18":  # Ctrl+X
                 self.skip = not self.skip
+            elif ch == "\x0e":  # Ctrl+N: launch a new session
+                return ("new", self.new_session_dir(), self.skip)
             elif ch == "\x04":  # Ctrl+D
                 if cur:
                     self.confirm_id = cur["id"]
             elif ch in ("\n", "\r", curses.KEY_ENTER):
                 if cur:
-                    return (cur, self.skip)
+                    return ("resume", cur, self.skip)
             elif ch == "\x1b":  # Esc: clear filter / close preview, else quit
                 if self.query or self.expanded_id:
                     self.query = ""
@@ -683,7 +713,9 @@ class View:
                 if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_RELEASED):
                     result = self.handle_click(my, mx)
                     if result and result[0] == "resume":
-                        return (result[1], self.skip)
+                        return ("resume", result[1], self.skip)
+                    if result and result[0] == "new":
+                        return ("new", result[1], self.skip)
             elif isinstance(ch, str) and ch.isprintable():
                 self.query += ch
                 self.sel = 0
@@ -696,33 +728,68 @@ def run(stdscr, sessions, query, skip):
     return View(stdscr, sessions, query, skip).loop()
 
 
+def resolve_launch(choice) -> tuple[str, list[str], str]:
+    """Turn a loop() result into (cwd, argv, human_note).
+
+    choice is ("resume", session, skip) or ("new", cwd, skip). Pure logic so it
+    can be unit-tested without curses or exec.
+    """
+    kind, payload, skip = choice
+    if kind == "resume":
+        session = payload
+        cwd = session["cwd"]
+        cmd = ["claude", "--resume", session["id"]]
+        note = f"Resuming {session['id'][:8]} in {cwd}"
+    elif kind == "new":
+        cwd = payload
+        cmd = ["claude"]
+        note = f"Starting a new session in {cwd}"
+    else:
+        raise ValueError(f"unknown launch kind: {kind!r}")
+    if skip:
+        cmd.append(SKIP_FLAG)
+        note += f"  {SKIP_FLAG}"
+    return cwd, cmd, note
+
+
 def main() -> None:
     args = sys.argv[1:]
     skip = False
     if SKIP_FLAG in args:
         skip = True
         args.remove(SKIP_FLAG)
+
+    # --new [dir]: skip the picker and launch a fresh session straight away.
+    if "--new" in args:
+        args.remove("--new")
+        target = os.path.expanduser(args[0]) if args else os.getcwd()
+        target = os.path.abspath(target)
+        if not os.path.isdir(target):
+            sys.exit(f"Directory does not exist: {target}")
+        cwd, cmd, note = resolve_launch(("new", target, skip))
+        print(f"{note}\n")
+        os.chdir(cwd)
+        try:
+            os.execvp("claude", cmd)
+        except FileNotFoundError:
+            sys.exit("`claude` not found on PATH.")
+        return
+
     query = args[0] if args else ""
 
+    # Empty is fine: the picker still lets you start a new session (Ctrl+N).
     sessions = collect()
-    if not sessions:
-        sys.exit("No sessions found.")
 
     choice = curses.wrapper(run, sessions, query, skip)
     if not choice:
         print("No session selected.")
         return
 
-    session, skip_perms = choice
-    cwd = session["cwd"]
-    cmd = ["claude", "--resume", session["id"]]
-    if skip_perms:
-        cmd.append(SKIP_FLAG)
+    cwd, cmd, note = resolve_launch(choice)
     if not os.path.isdir(cwd):
-        sys.exit(f"Session directory no longer exists: {cwd}")
+        sys.exit(f"Directory no longer exists: {cwd}")
 
-    flag_note = f"  {SKIP_FLAG}" if skip_perms else ""
-    print(f"Resuming {session['id'][:8]} in {cwd}{flag_note}\n")
+    print(f"{note}\n")
     os.chdir(cwd)
     try:
         os.execvp("claude", cmd)

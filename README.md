@@ -9,7 +9,8 @@ view, with the exact `claude --resume` command for each session.
 
 - **`sessions`** — prints a static table of all sessions, newest first.
 - **`resume`** — an interactive terminal picker: arrow keys, type-to-filter,
-  Enter to resume the highlighted session in its own working directory.
+  Enter to resume the highlighted session in its own working directory, or
+  **Ctrl+N to launch a brand-new session** in the directory you're looking at.
 
 No third-party dependencies — just `python3` (which Claude Code already needs).
 
@@ -38,7 +39,18 @@ sessions --json          # machine-readable
 resume                   # interactive picker
 resume myproject         # start pre-filtered
 resume --dangerously-skip-permissions   # start with skip-perms toggled ON
+resume --new             # skip the picker: new session in the current directory
+resume --new ~/code/app  # new session in a specific directory
 ```
+
+### Starting a new session
+
+From the picker, **Ctrl+N** (or the `＋new` chip in the header) launches a fresh
+`claude` session — no `--resume`. The directory is chosen as: an existing path
+you've typed into the filter, otherwise the highlighted row's directory,
+otherwise the directory you ran `resume` from. The skip-perms toggle (Ctrl+X)
+applies to new sessions too. With no sessions on disk yet, the picker still
+opens so you can start your first one with Ctrl+N.
 
 ### Picker keys (`resume`)
 
@@ -49,7 +61,8 @@ resume --dangerously-skip-permissions   # start with skip-perms toggled ON
 | type any text  | filter by name / directory / summary              |
 | Backspace      | delete a filter character                         |
 | Tab            | cycle sort: recent ⇄ directory                    |
-| Ctrl+X         | toggle `--dangerously-skip-permissions` on resume |
+| Ctrl+X         | toggle `--dangerously-skip-permissions`           |
+| Ctrl+N         | launch a new session (filter-path / selected dir / cwd) |
 | Ctrl+D         | delete the selected session (asks to confirm)     |
 | Enter          | resume the selected session                       |
 | Esc / Ctrl+C   | quit                                              |
