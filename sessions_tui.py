@@ -61,7 +61,22 @@ def matches(s: dict, query: str) -> bool:
         or q in s["cwd"].lower()
         or q in s["summary"].lower()
         or q in s["first"].lower()
+        or q in s["agent"].lower()
     )
+
+
+def resume_argv(session: dict, skip: bool) -> list[str]:
+    """The argv that resumes a session, per agent.
+
+    `--dangerously-skip-permissions` is a Claude Code flag; Codex has its own
+    sandbox model, so skip-perms is only ever appended for Claude.
+    """
+    if session["agent"] == "codex":
+        return ["codex", "resume", session["id"]]
+    cmd = ["claude", "--resume", session["id"]]
+    if skip:
+        cmd.append(SKIP_FLAG)
+    return cmd
 
 
 def sort_key(mode: str):
@@ -428,6 +443,9 @@ class View:
             lcol, lattr = th.dim, 0
         if selected:
             lattr |= curses.A_BOLD
+        # agent badge: text (not colour alone) + colour reinforcement
+        badge = "cx" if s["agent"] == "codex" else "cl"
+        bcol = th.green if s["agent"] == "codex" else th.accent
         parent, leaf = short_dir(s["cwd"])
         size_str = human_size(s["size"])
         id8 = s["id"][:8]
@@ -437,7 +455,8 @@ class View:
             if selected:
                 put(scr, y, lo["lm"], G_BAR, th.accent | curses.A_BOLD, lo["x_time"])
             put(scr, y, lo["x_time"], ellipsize(tstr, 10), tcol | (curses.A_BOLD if selected else 0), lo["x_name"])
-            put(scr, y, lo["x_name"], ellipsize(label, lo["name_w"]), lcol | lattr, lo["name_right"])
+            put(scr, y, lo["x_name"], badge, bcol | curses.A_BOLD, lo["x_name"] + 2)
+            put(scr, y, lo["x_name"] + 3, ellipsize(label, max(1, lo["name_w"] - 3)), lcol | lattr, lo["name_right"])
             # directory: parent dim + leaf coloured, left-ellipsized so leaf stays
             dw = lo["dir_w"]
             if len(parent) + len(leaf) > dw:
@@ -499,7 +518,7 @@ class View:
         for wl in wrapped[:2]:
             drawers.append(box_line(lambda y, x, r, wl=wl: put(self.stdscr, y, x, wl, th.text, r)))
 
-        meta = f"{s['msgs']} messages · {human_size(s['size'])} on disk · last active {rel_time(s['mtime'], now)}"
+        meta = f"{s['agent']} · {s['msgs']} messages · {human_size(s['size'])} on disk · last active {rel_time(s['mtime'], now)}"
         drawers.append(box_line(lambda y, x, r: put(self.stdscr, y, x, ellipsize(meta, r - x), th.dim, r)))
 
         logp = s["path"].replace(HOME, "~", 1)
@@ -508,10 +527,12 @@ class View:
         def cmd_line(y, x, r):
             scr = self.stdscr
             cx = put(scr, y, x, "$ ", th.dim, r)
-            cmd = f"claude --resume {s['id']}"
-            cx = put(scr, y, cx, cmd, th.text, r)
-            if self.skip:
-                put(scr, y, cx + 1, SKIP_FLAG, th.red | curses.A_BOLD, r)
+            if s["agent"] == "codex":
+                put(scr, y, cx, f"codex resume {s['id']}", th.text, r)
+            else:
+                cx = put(scr, y, cx, f"claude --resume {s['id']}", th.text, r)
+                if self.skip:
+                    put(scr, y, cx + 1, SKIP_FLAG, th.red | curses.A_BOLD, r)
         drawers.append(box_line(cmd_line))
 
         # action chips (clickable)
@@ -625,7 +646,7 @@ class View:
         return None
 
     def _do_copy(self, s):
-        cmd = f"claude --resume {s['id']}" + (f" {SKIP_FLAG}" if self.skip else "")
+        cmd = " ".join(resume_argv(s, self.skip))
         if copy_to_clipboard(cmd):
             self.set_toast(f"copied: {cmd}")
         else:
@@ -738,17 +759,20 @@ def resolve_launch(choice) -> tuple[str, list[str], str]:
     if kind == "resume":
         session = payload
         cwd = session["cwd"]
-        cmd = ["claude", "--resume", session["id"]]
-        note = f"Resuming {session['id'][:8]} in {cwd}"
+        cmd = resume_argv(session, skip)  # handles agent + skip-perms
+        note = f"Resuming {session['id'][:8]} ({session['agent']}) in {cwd}"
+        if skip and session["agent"] == "claude":
+            note += f"  {SKIP_FLAG}"
     elif kind == "new":
+        # New sessions launch Claude (this is Tron's picker); Codex starts its own.
         cwd = payload
         cmd = ["claude"]
         note = f"Starting a new session in {cwd}"
+        if skip:
+            cmd.append(SKIP_FLAG)
+            note += f"  {SKIP_FLAG}"
     else:
         raise ValueError(f"unknown launch kind: {kind!r}")
-    if skip:
-        cmd.append(SKIP_FLAG)
-        note += f"  {SKIP_FLAG}"
     return cwd, cmd, note
 
 
@@ -770,9 +794,9 @@ def main() -> None:
         print(f"{note}\n")
         os.chdir(cwd)
         try:
-            os.execvp("claude", cmd)
+            os.execvp(cmd[0], cmd)
         except FileNotFoundError:
-            sys.exit("`claude` not found on PATH.")
+            sys.exit(f"`{cmd[0]}` not found on PATH.")
         return
 
     query = args[0] if args else ""

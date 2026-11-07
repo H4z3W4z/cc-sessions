@@ -1,18 +1,28 @@
 # cc-sessions
 
-Two small tools for finding and resuming **Claude Code** sessions across *every*
-directory you've launched it from — not just the current one.
+Two small tools for finding and resuming **Claude Code** *and* **Codex**
+sessions across *every* directory you've launched them from — not just the
+current one, and not just one agent.
 
-Claude Code writes each session as a JSONL log under `~/.claude/projects/`.
-These tools read those logs (read-only) and give you a single cross-directory
-view, with the exact `claude --resume` command for each session.
+Each agent writes its sessions to disk, and these tools read those logs
+(read-only) and give you a single, unified, newest-first view — every session
+tagged by agent, with the exact resume command for each:
 
-- **`sessions`** — prints a static table of all sessions, newest first.
-- **`resume`** — an interactive terminal picker: arrow keys, type-to-filter,
-  Enter to resume the highlighted session in its own working directory, or
-  **Ctrl+N to launch a brand-new session** in the directory you're looking at.
+| Agent       | On-disk logs                               | Resume command         |
+| ----------- | ------------------------------------------ | ---------------------- |
+| Claude Code | `~/.claude/projects/*/*.jsonl`             | `claude --resume <id>` |
+| Codex       | `~/.codex/sessions/*/*/*/rollout-*.jsonl`  | `codex resume <id>`    |
 
-No third-party dependencies — just `python3` (which Claude Code already needs).
+- **`sessions`** — prints a static table of all sessions, newest first, with an
+  `AGENT` column.
+- **`resume`** — an interactive terminal picker: arrow keys, type-to-filter
+  (including by agent — type `codex` or `claude`), each row carrying a `cl`/`cx`
+  agent badge; Enter resumes the highlighted session **with the right agent** in
+  its own working directory, or **Ctrl+N to launch a brand-new session** in the
+  directory you're looking at.
+
+Either store can be absent — if you only run one agent, you just see that one.
+No third-party dependencies — just `python3` (which both agents already need).
 
 ## Install
 
@@ -31,16 +41,34 @@ To move it to another machine, copy this whole folder (or `git clone` /
 ## Usage
 
 ```bash
-sessions                 # all sessions, newest first
+sessions                 # all sessions (both agents), newest first
 sessions -n 15           # 15 most recent
-sessions myproject       # filter by name / directory / first message
-sessions --json          # machine-readable
+sessions myproject       # filter by name / directory / first message / agent
+sessions codex           # only Codex sessions (agent is matchable)
+sessions --json          # machine-readable (includes the "agent" field)
 
 resume                   # interactive picker
 resume myproject         # start pre-filtered
 resume --dangerously-skip-permissions   # start with skip-perms toggled ON
 resume --new             # skip the picker: new session in the current directory
 resume --new ~/code/app  # new session in a specific directory
+```
+
+### Multiple agents
+
+Sessions from Claude Code and Codex are merged into one recency-sorted list,
+each tagged by agent. Resuming always uses the correct agent and command
+(`claude --resume` vs `codex resume`). Note that
+`--dangerously-skip-permissions` is a **Claude Code** flag — it is only ever
+applied to Claude sessions (and to new sessions, which launch Claude); Codex has
+its own sandbox model and is never passed that flag. **Ctrl+N** starts a new
+*Claude* session (Codex starts its own).
+
+To point the tools at a store in a non-default location (e.g. for testing, or a
+copied store from another host), set `CC_CLAUDE_DIR` and/or `CC_CODEX_DIR`:
+
+```bash
+CC_CODEX_DIR=/tmp/codex-copy/sessions sessions   # read Codex logs from elsewhere
 ```
 
 ### Starting a new session
@@ -58,7 +86,7 @@ opens so you can start your first one with Ctrl+N.
 | -------------- | ------------------------------------------------- |
 | Up/Down, k/j   | move selection                                    |
 | PgUp/PgDn      | jump a page                                        |
-| type any text  | filter by name / directory / summary              |
+| type any text  | filter by name / directory / summary / agent      |
 | Backspace      | delete a filter character                         |
 | Tab            | cycle sort: recent ⇄ directory                    |
 | Ctrl+X         | toggle `--dangerously-skip-permissions`           |
