@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Interactive TUI to browse and resume Claude Code sessions.
+"""Interactive TUI to browse and resume Claude Code and Codex sessions.
 
-A keyboard-first (and mouse-aware) curses picker over every Claude Code session
-on disk. Reuses the scanning logic in sessions.py. Implements the cc-sessions
+A keyboard-first (and mouse-aware) curses picker over every Claude Code and
+Codex session on disk, each tagged with a cl/cx agent badge. Reuses the scanning logic in sessions.py. Implements the cc-sessions
 TUI design: header with sort tabs + skip-perms chip, live filter, dense session
 list with recency-coloured times, an inline expandable preview per session,
 directory grouping, toasts and inline confirms.
 
 Keys:
     Up/Down          move selection        PgUp/PgDn   jump 10
-    type any text    filter (name/dir/summary/first message)
+    type any text    filter (name/dir/summary/first message/agent);
+                     @claude / @codex (or @cl / @cx) restricts to one agent
     Backspace        delete a filter char
     Right / Left     open / close the preview for the selected row
     Tab              cycle sort: recent <-> directory
@@ -37,7 +38,7 @@ import sys
 import time
 from pathlib import Path
 
-from sessions import collect, human_size
+from sessions import collect, human_size, split_agent_query, matches as _matches
 
 SKIP_FLAG = "--dangerously-skip-permissions"
 SORT_MODES = ("recent", "directory")
@@ -54,15 +55,12 @@ G_HRULE = "─"    # ─
 # ---------------------------------------------------------------------------
 # data helpers
 # ---------------------------------------------------------------------------
+TUI_SEARCH_FIELDS = ("name", "cwd", "summary", "first", "agent")
+
+
 def matches(s: dict, query: str) -> bool:
-    q = query.lower()
-    return (
-        q in s["name"].lower()
-        or q in s["cwd"].lower()
-        or q in s["summary"].lower()
-        or q in s["first"].lower()
-        or q in s["agent"].lower()
-    )
+    """Like sessions.matches, but also searches the full first message."""
+    return _matches(s, query, TUI_SEARCH_FIELDS)
 
 
 def resume_argv(session: dict, skip: bool) -> list[str]:
@@ -118,14 +116,28 @@ def short_dir(cwd: str) -> tuple[str, str]:
 
 
 def delete_session(s: dict) -> None:
+    """Delete a session's log (and, for Claude, its subagent transcript dir).
+
+    Codex's session_index.jsonl is deliberately left alone: it's Codex-owned
+    state that Codex may be appending to, and a stale entry is harmless — the
+    rollout file is what makes a session exist (and resumable).
+    """
     p = Path(s["path"])
     try:
         p.unlink()
     except FileNotFoundError:
         pass
-    sub = p.parent / s["id"]
-    if sub.is_dir():
-        shutil.rmtree(sub, ignore_errors=True)
+    if s["agent"] == "claude":
+        sub = p.parent / s["id"]
+        if sub.is_dir():
+            shutil.rmtree(sub, ignore_errors=True)
+
+
+def delete_prompt(s: dict) -> str:
+    name = s["name"] or s["summary"] or s["id"][:8]
+    what = "and its subagent transcripts" if s["agent"] == "claude" else "(Codex rollout log)"
+    return (f"Delete {s['agent']} session {s['id'][:8]} “{name}” {what}? "
+            f"This cannot be undone.  (y/N)")
 
 
 def copy_to_clipboard(text: str) -> bool:
@@ -164,6 +176,7 @@ class Theme:
             self.dim = pair(7, 240)
             self.vdim = pair(8, 238)
             self.leaf = pair(9, 109)
+            self.codex = pair(10, 176)  # orchid: distinct from recency green
         else:
             self.accent = pair(1, curses.COLOR_CYAN)
             self.green = pair(2, curses.COLOR_GREEN)
@@ -174,6 +187,7 @@ class Theme:
             self.dim = curses.A_DIM
             self.vdim = curses.A_DIM
             self.leaf = pair(9, curses.COLOR_CYAN)
+            self.codex = pair(10, curses.COLOR_MAGENTA)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +297,8 @@ class View:
         selected row's directory, then the process cwd. Pure logic (no curses),
         so it is unit-testable.
         """
-        q = os.path.expanduser(self.query.strip())
+        _, text = split_agent_query(self.query)  # "@cx ~/app" -> "~/app"
+        q = os.path.expanduser(text.strip())
         if q and os.path.isdir(q):
             return os.path.abspath(q)
         rows = self.filtered()
@@ -361,7 +376,7 @@ class View:
             put(s, 1, x, " ", th.accent | curses.A_REVERSE, width)
         x += 1
         if not self.query:
-            put(s, 1, x + 1, "type to filter by name, directory or message…", th.vdim, width)
+            put(s, 1, x + 1, "type to filter by name, directory or message · @cl / @cx for one agent…", th.vdim, width)
         match = f"{len(rows)}/{total}"
         put(s, 1, width - len(match) - 1, match, th.sec, width)
 
@@ -445,7 +460,7 @@ class View:
             lattr |= curses.A_BOLD
         # agent badge: text (not colour alone) + colour reinforcement
         badge = "cx" if s["agent"] == "codex" else "cl"
-        bcol = th.green if s["agent"] == "codex" else th.accent
+        bcol = th.codex if s["agent"] == "codex" else th.accent
         parent, leaf = short_dir(s["cwd"])
         size_str = human_size(s["size"])
         id8 = s["id"][:8]
@@ -595,10 +610,7 @@ class View:
         if self.confirm_id:
             cs = next((x for x in self.all if x["id"] == self.confirm_id), None)
             if cs:
-                name = cs["name"] or cs["summary"] or cs["id"][:8]
-                txt = (f"Delete session {cs['id'][:8]} “{name}” and its subagent "
-                       f"transcripts? This cannot be undone.  (y/N)")
-                put(s, y, 1, ellipsize(txt, width - 2), th.red | curses.A_BOLD, width)
+                put(s, y, 1, ellipsize(delete_prompt(cs), width - 2), th.red | curses.A_BOLD, width)
             return
         if self.toast and self.toast[1] > time.time():
             put(s, y, 1, ellipsize(self.toast[0], width - 2), th.accent, width)
@@ -776,6 +788,22 @@ def resolve_launch(choice) -> tuple[str, list[str], str]:
     return cwd, cmd, note
 
 
+def launch(cwd: str, cmd: list[str], note: str) -> None:
+    """chdir into the session's directory and exec the agent. Never returns.
+
+    The program exec'd is always cmd[0] — the agent resolve_launch chose — so a
+    Codex resume runs `codex`, never `claude`.
+    """
+    if not os.path.isdir(cwd):
+        sys.exit(f"Directory no longer exists: {cwd}")
+    print(f"{note}\n")
+    os.chdir(cwd)
+    try:
+        os.execvp(cmd[0], cmd)
+    except FileNotFoundError:
+        sys.exit(f"`{cmd[0]}` not found on PATH.")
+
+
 def main() -> None:
     args = sys.argv[1:]
     skip = False
@@ -790,13 +818,7 @@ def main() -> None:
         target = os.path.abspath(target)
         if not os.path.isdir(target):
             sys.exit(f"Directory does not exist: {target}")
-        cwd, cmd, note = resolve_launch(("new", target, skip))
-        print(f"{note}\n")
-        os.chdir(cwd)
-        try:
-            os.execvp(cmd[0], cmd)
-        except FileNotFoundError:
-            sys.exit(f"`{cmd[0]}` not found on PATH.")
+        launch(*resolve_launch(("new", target, skip)))
         return
 
     query = args[0] if args else ""
@@ -809,16 +831,7 @@ def main() -> None:
         print("No session selected.")
         return
 
-    cwd, cmd, note = resolve_launch(choice)
-    if not os.path.isdir(cwd):
-        sys.exit(f"Directory no longer exists: {cwd}")
-
-    print(f"{note}\n")
-    os.chdir(cwd)
-    try:
-        os.execvp("claude", cmd)
-    except FileNotFoundError:
-        sys.exit("`claude` not found on PATH.")
+    launch(*resolve_launch(choice))
 
 
 if __name__ == "__main__":

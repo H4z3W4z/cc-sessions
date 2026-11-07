@@ -11,12 +11,14 @@ Usage:
     python3 sessions.py            # all sessions, newest first
     python3 sessions.py -n 15      # only the 15 most recent
     python3 sessions.py vast       # name/dir/summary/agent matches "vast"
-    python3 sessions.py codex      # (agent is matchable) only Codex sessions
+    python3 sessions.py @codex     # only Codex sessions (@claude/@cl/@cx too)
+    python3 sessions.py @cx vast   # Codex sessions matching "vast"
     python3 sessions.py --json     # machine-readable output
 
 Environment overrides (handy for testing against a copied store):
     CC_CLAUDE_DIR   override ~/.claude/projects
-    CC_CODEX_DIR    override ~/.codex/sessions
+    CC_CODEX_DIR    override ~/.codex/sessions (session_index.jsonl is read
+                    from its parent directory, mirroring ~/.codex)
 """
 from __future__ import annotations
 
@@ -36,12 +38,46 @@ def _dir(env: str, default: Path) -> Path:
 
 PROJECTS_DIR = _dir("CC_CLAUDE_DIR", Path.home() / ".claude" / "projects")
 CODEX_DIR = _dir("CC_CODEX_DIR", Path.home() / ".codex" / "sessions")
-CODEX_INDEX = Path.home() / ".codex" / "session_index.jsonl"
+# The index sits beside sessions/ in ~/.codex; derive it so CC_CODEX_DIR moves both.
+CODEX_INDEX = CODEX_DIR.parent / "session_index.jsonl"
 
 # UUID embedded in a Codex rollout filename: rollout-<ISO8601>-<uuid>.jsonl
 _CODEX_ID_RE = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
+
+
+# ---------------------------------------------------------------------------
+# filtering
+# ---------------------------------------------------------------------------
+AGENT_ALIASES = {"claude": "claude", "cl": "claude", "codex": "codex", "cx": "codex"}
+SEARCH_FIELDS = ("name", "cwd", "summary", "agent")
+
+
+def split_agent_query(query: str) -> tuple[str | None, str]:
+    """Split '@cx vast' into ('codex', 'vast').
+
+    An @agent token (@claude/@cl/@codex/@cx, any case, anywhere in the query)
+    restricts by agent exactly; the remaining words are a substring match.
+    Unknown @tokens are left in the text so '@foo' still searches for '@foo'.
+    """
+    agent, rest = None, []
+    for tok in query.split():
+        alias = AGENT_ALIASES.get(tok[1:].lower()) if tok.startswith("@") else None
+        if alias:
+            agent = alias
+        else:
+            rest.append(tok)
+    return agent, " ".join(rest)
+
+
+def matches(s: dict, query: str, fields: tuple[str, ...] = SEARCH_FIELDS) -> bool:
+    """Case-insensitive match of a session against a filter query."""
+    agent, text = split_agent_query(query)
+    if agent and s["agent"] != agent:
+        return False
+    q = text.lower()
+    return not q or any(q in s[f].lower() for f in fields)
 
 
 def first_user_text(message) -> str | None:
@@ -65,6 +101,8 @@ def is_noise(text: str) -> bool:
         or t.startswith("# AGENTS.md")
         or t.startswith("<INSTRUCTIONS>")
         or t.startswith("<user-prompt-submit-hook>")
+        or t.startswith("<environment_context>")
+        or t.startswith("<user_instructions>")
         # Codex resume/fork injects the prior transcript as the first "user" turn
         or t.startswith("The following is the Codex agent history")
     )
@@ -90,6 +128,8 @@ def parse_session(path: Path) -> dict:
                 try:
                     d = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):  # valid JSON, but not an event object
                     continue
 
                 if d.get("customTitle"):
@@ -130,7 +170,13 @@ def parse_session(path: Path) -> dict:
 def collect_claude() -> list[dict]:
     if not PROJECTS_DIR.is_dir():
         return []
-    return [parse_session(p) for p in PROJECTS_DIR.glob("*/*.jsonl")]
+    out = []
+    for p in PROJECTS_DIR.glob("*/*.jsonl"):
+        try:
+            out.append(parse_session(p))
+        except OSError:  # vanished between glob and stat (e.g. deleted mid-scan)
+            continue
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +197,8 @@ def _codex_index_names() -> dict[str, str]:
                 try:
                     d = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):  # valid JSON, but not an event object
                     continue
                 sid, name = d.get("id"), d.get("thread_name")
                 if sid and name:
@@ -187,7 +235,7 @@ def _codex_user_text(payload: dict) -> str | None:
 
 def parse_codex_session(path: Path, names: dict[str, str]) -> dict:
     m = _CODEX_ID_RE.search(path.name)
-    session_id = m.group(1) if m else path.stem
+    session_id = m.group(1) if m else None  # filename is authoritative when it has one
     cwd = None
     summary = None
     first_full = None
@@ -203,9 +251,13 @@ def parse_codex_session(path: Path, names: dict[str, str]) -> dict:
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(d, dict):  # valid JSON, but not an event object
+                    continue
 
                 typ = d.get("type")
-                payload = d.get("payload") or {}
+                payload = d.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
 
                 if typ == "session_meta":
                     if not cwd and payload.get("cwd"):
@@ -216,17 +268,24 @@ def parse_codex_session(path: Path, names: dict[str, str]) -> dict:
                 # message payload; key off the payload type, not the wrapper.
                 elif payload.get("type") == "message":
                     role = payload.get("role")
-                    if role in ("user", "assistant"):
+                    if role == "assistant":
                         msgs += 1
-                    if summary is None and role == "user":
+                    elif role == "user":
+                        # Codex injects AGENTS.md / environment context as
+                        # "user" turns; those are neither counted nor summarised.
                         text = _codex_user_text(payload)
-                        if text and not is_noise(text):
+                        if text and is_noise(text):
+                            continue
+                        msgs += 1
+                        if summary is None and text:
                             flat = " ".join(text.split())
                             summary = flat[:60]
                             first_full = flat[:2000]
     except OSError:
         pass
 
+    if not session_id:
+        session_id = path.stem
     if not cwd:
         cwd = str(Path.home())
 
@@ -285,22 +344,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="List all Claude Code and Codex sessions."
     )
-    ap.add_argument("filter", nargs="?", help="case-insensitive match on name/dir/summary/agent")
+    ap.add_argument(
+        "filter", nargs="*",
+        help="case-insensitive match on name/dir/summary/agent; @claude/@codex (or @cl/@cx) restricts by agent",
+    )
     ap.add_argument("-n", "--limit", type=int, help="show only the N most recent")
     ap.add_argument("--json", action="store_true", help="output JSON")
     args = ap.parse_args()
 
     sessions = collect()
 
-    if args.filter:
-        q = args.filter.lower()
-        sessions = [
-            s for s in sessions
-            if q in s["name"].lower()
-            or q in s["cwd"].lower()
-            or q in s["summary"].lower()
-            or q in s["agent"].lower()
-        ]
+    query = " ".join(args.filter)
+    if query:
+        sessions = [s for s in sessions if matches(s, query)]
     if args.limit:
         sessions = sessions[: args.limit]
 

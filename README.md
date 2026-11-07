@@ -16,7 +16,7 @@ tagged by agent, with the exact resume command for each:
 - **`sessions`** — prints a static table of all sessions, newest first, with an
   `AGENT` column.
 - **`resume`** — an interactive terminal picker: arrow keys, type-to-filter
-  (including by agent — type `codex` or `claude`), each row carrying a `cl`/`cx`
+  (including by agent — `@codex` / `@claude`, or `@cx` / `@cl`), each row carrying a `cl`/`cx`
   agent badge; Enter resumes the highlighted session **with the right agent** in
   its own working directory, or **Ctrl+N to launch a brand-new session** in the
   directory you're looking at.
@@ -44,7 +44,8 @@ To move it to another machine, copy this whole folder (or `git clone` /
 sessions                 # all sessions (both agents), newest first
 sessions -n 15           # 15 most recent
 sessions myproject       # filter by name / directory / first message / agent
-sessions codex           # only Codex sessions (agent is matchable)
+sessions @codex          # only Codex sessions (@claude, @cl, @cx also work)
+sessions @cx myproject   # Codex sessions matching "myproject"
 sessions --json          # machine-readable (includes the "agent" field)
 
 resume                   # interactive picker
@@ -84,9 +85,9 @@ opens so you can start your first one with Ctrl+N.
 
 | Key            | Action                                            |
 | -------------- | ------------------------------------------------- |
-| Up/Down, k/j   | move selection                                    |
+| Up/Down        | move selection                                    |
 | PgUp/PgDn      | jump a page                                        |
-| type any text  | filter by name / directory / summary / agent      |
+| type any text  | filter by name / directory / summary / agent; `@cx` / `@cl` = one agent only |
 | Backspace      | delete a filter character                         |
 | Tab            | cycle sort: recent ⇄ directory                    |
 | Ctrl+X         | toggle `--dangerously-skip-permissions`           |
@@ -95,10 +96,21 @@ opens so you can start your first one with Ctrl+N.
 | Enter          | resume the selected session                       |
 | Esc / Ctrl+C   | quit                                              |
 
-**Note:** `Ctrl+D` permanently deletes the session log and its subagent
-transcripts — there is no undo. Resuming with `--dangerously-skip-permissions`
+**Note:** `Ctrl+D` permanently deletes the session log (for Claude, also its
+subagent transcripts) — there is no undo. For Codex, the entry in
+`~/.codex/session_index.jsonl` is left in place; it's Codex-owned and harmless
+once the rollout file is gone. Resuming with `--dangerously-skip-permissions`
 disables Claude Code's permission prompts for that session; it is off by default
 and must be toggled deliberately.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Stdlib only; builds throwaway Claude and Codex stores in a temp directory and
+stubs `exec`, so it never touches your real sessions or launches anything.
 
 ## Uninstall
 
@@ -106,5 +118,5 @@ and must be toggled deliberately.
 ./uninstall.sh
 ```
 
-Removes the commands and library. Your sessions in `~/.claude/projects` are
-never touched.
+Removes the commands and library. Your sessions in `~/.claude/projects` and
+`~/.codex/sessions` are never touched.
